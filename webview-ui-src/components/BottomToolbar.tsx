@@ -4,6 +4,36 @@ import type { WorkspaceFolder } from '../hooks/useExtensionMessages.js';
 import { vscode } from '../vscodeApi.js';
 import { SettingsModal } from './SettingsModal.js';
 
+// Custom roles storage
+const CUSTOM_ROLES_KEY = 'pixel_office_custom_roles';
+
+export function getCustomRoles(): string[] {
+  try {
+    const stored = localStorage.getItem(CUSTOM_ROLES_KEY);
+    return stored ? JSON.parse(stored) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveCustomRole(role: string): string[] {
+  const roles = getCustomRoles();
+  if (!roles.includes(role)) {
+    roles.push(role);
+    localStorage.setItem(CUSTOM_ROLES_KEY, JSON.stringify(roles));
+    // Notify other components
+    window.dispatchEvent(new Event('pixel_office_roles_updated'));
+  }
+  return roles;
+}
+
+export function deleteCustomRole(role: string): string[] {
+  const roles = getCustomRoles().filter(r => r !== role);
+  localStorage.setItem(CUSTOM_ROLES_KEY, JSON.stringify(roles));
+  window.dispatchEvent(new Event('pixel_office_roles_updated'));
+  return roles;
+}
+
 interface BottomToolbarProps {
   onHireAgent?: (name: string, role: string, dept: string, salary: number, currency: string, country: string) => void;
   currentFloor?: number;
@@ -54,22 +84,6 @@ const btnActive: React.CSSProperties = {
 
 // ── Hire Dialog styles ─────────────────────────────────────────────────────
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// ── HireDialog component ───────────────────────────────────────────────────
 const COUNTRIES = [
   { name: 'Global', flag: '🌍', cur: 'USD', sym: '$' },
   { name: 'India', flag: '🇮🇳', cur: 'INR', sym: '₹' },
@@ -84,8 +98,8 @@ const CURRENCY_SYMBOLS: Record<string, string> = {
   USD: '$', INR: '₹', GBP: '£', EUR: '€', JPY: '¥', RUB: '₽',
 };
 
-// Base USD monthly salaries
-const ROLE_SALARY: Record<string, number> = {
+// Base USD monthly salaries - DEFAULT ROLES
+const DEFAULT_ROLE_SALARY: Record<string, number> = {
   CEO: 12000, CTO: 10000, Manager: 6000, Developer: 5000, Designer: 4500, QA: 4000,
   HR: 4000, Marketing: 4500, Sales: 4000, Analyst: 4500, DevOps: 5500, Intern: 1500,
 };
@@ -98,27 +112,87 @@ const FX_RATES: Record<string, number> = {
 function HireDialog({ onClose, onHire }: { onClose: () => void; onHire: (name: string, role: string, dept: string, salary: number, currency: string, country: string) => void }) {
   const [name, setName] = useState('');
   const [role, setRole] = useState('Developer');
+  const [customRole, setCustomRole] = useState('');
   const [dept, setDept] = useState('Engineering');
   const [country, setCountry] = useState('Global');
   const [currency, setCurrency] = useState('USD');
-  const [salaryStr, setSalaryStr] = useState(String(ROLE_SALARY['Developer']));
+  const [salaryStr, setSalaryStr] = useState(String(DEFAULT_ROLE_SALARY['Developer']));
   const [hovered, setHovered] = useState<string | null>(null);
+  const [customRoles, setCustomRoles] = useState<string[]>(getCustomRoles());
+  const [showCustomInput, setShowCustomInput] = useState(false);
+  const [showManageRoles, setShowManageRoles] = useState(false);
 
+  // Get all roles including custom
+  const allRoles = [
+    ...Object.keys(DEFAULT_ROLE_SALARY),
+    ...customRoles,
+    'Other'
+  ];
+
+  // Listen for custom role updates
   useEffect(() => {
-    const baseUsd = ROLE_SALARY[role] ?? 4000;
-    const rate = FX_RATES[currency] ?? 1;
-    setSalaryStr(String(Math.round(baseUsd * rate)));
-  }, [role, currency]);
+    const handleUpdate = () => setCustomRoles([...getCustomRoles()]);
+    window.addEventListener('pixel_office_roles_updated', handleUpdate);
+    return () => window.removeEventListener('pixel_office_roles_updated', handleUpdate);
+  }, []);
+
+  // Update salary when role changes
+  useEffect(() => {
+    if (role === 'Other' || showCustomInput) {
+      const baseUsd = DEFAULT_ROLE_SALARY['Other'] ?? 4000;
+      const rate = FX_RATES[currency] ?? 1;
+      setSalaryStr(String(Math.round(baseUsd * rate)));
+    } else {
+      const baseUsd = DEFAULT_ROLE_SALARY[role] ?? 4000;
+      const rate = FX_RATES[currency] ?? 1;
+      setSalaryStr(String(Math.round(baseUsd * rate)));
+    }
+  }, [role, currency, showCustomInput]);
 
   useEffect(() => {
     const c = COUNTRIES.find(x => x.name === country);
     if (c) setCurrency(c.cur);
   }, [country]);
 
+  const handleRoleChange = (newRole: string) => {
+    setRole(newRole);
+    if (newRole === 'Other') {
+      setShowCustomInput(true);
+    } else {
+      setShowCustomInput(false);
+      setCustomRole('');
+    }
+  };
+
+  const handleCreateCustomRole = () => {
+    if (customRole.trim()) {
+      const newRoles = saveCustomRole(customRole.trim());
+      setCustomRoles(newRoles);
+      setRole(customRole.trim());
+      setShowCustomInput(false);
+      setCustomRole('');
+    }
+  };
+
+  const handleDeleteCustomRole = (r: string) => {
+    const newRoles = deleteCustomRole(r);
+    setCustomRoles(newRoles);
+    if (role === r) {
+      setRole('Developer');
+    }
+  };
+
   const handleHire = () => {
     const finalName = name.trim() || `Agent ${Math.floor(Math.random() * 1000)}`;
+    const finalRole = role === 'Other' ? customRole.trim() : role;
     const finalSalary = parseInt(salaryStr, 10) || 0;
-    onHire(finalName, role, dept, finalSalary, currency, country);
+    
+    if (!finalRole) {
+      alert('Please enter a custom role name!');
+      return;
+    }
+    
+    onHire(finalName, finalRole, dept, finalSalary, currency, country);
     onClose();
   };
 
@@ -131,8 +205,10 @@ function HireDialog({ onClose, onHire }: { onClose: () => void; onHire: (name: s
     <div style={{
       position: 'absolute', bottom: '100%', left: 0, marginBottom: 8,
       background: 'var(--pixel-agent-bg)', border: '2px solid var(--pixel-agent-border)',
-      boxShadow: 'var(--pixel-shadow)', width: 360, zIndex: 'var(--pixel-controls-z)',
+      boxShadow: 'var(--pixel-shadow)', width: 380, zIndex: 'var(--pixel-controls-z)',
       display: 'flex', flexDirection: 'column', fontFamily: 'monospace',
+      maxHeight: '80vh',
+      overflowY: 'auto',
     }}>
       <div style={{
         background: 'var(--pixel-active-bg)', borderBottom: '2px solid var(--pixel-agent-border)',
@@ -149,41 +225,148 @@ function HireDialog({ onClose, onHire }: { onClose: () => void; onHire: (name: s
           <input autoFocus type="text" value={name} onChange={e => setName(e.target.value)} placeholder="Agent Name..." style={inputStyle} onKeyDown={e => { if (e.key === 'Enter') handleHire(); if (e.key === 'Escape') onClose(); }} />
         </div>
 
-        <div style={{ display: 'flex', gap: 8 }}>
-          <div style={{ flex: 1 }}>
-            <label style={{ display: 'block', marginBottom: 4, color: 'var(--pixel-text-dim)', fontSize: '16px' }}>Role</label>
-            <select value={role} onChange={e => setRole(e.target.value)} style={inputStyle}>
-              {Object.keys(ROLE_SALARY).map(r => <option key={r} value={r}>{r}</option>)}
-            </select>
+        {/* Role Selection */}
+        <div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+            <label style={{ color: 'var(--pixel-text-dim)', fontSize: '16px' }}>Role</label>
+            <button 
+              onClick={() => setShowManageRoles(!showManageRoles)}
+              style={{ 
+                background: showManageRoles ? '#cc88ff50' : 'transparent', 
+                border: '1px solid #cc88ff', 
+                color: '#cc88ff', 
+                fontSize: '12px', 
+                padding: '2px 6px', 
+                cursor: 'pointer',
+                borderRadius: '4px'
+              }}
+            >
+              🌟 Manage Custom Roles ({customRoles.length})
+            </button>
           </div>
+          
+          {/* Manage Custom Roles Panel */}
+          {showManageRoles && (
+            <div style={{
+              background: '#1a1a2e',
+              border: '1px solid #cc88ff',
+              borderRadius: '4px',
+              padding: '8px',
+              marginBottom: '8px',
+              maxHeight: '120px',
+              overflowY: 'auto'
+            }}>
+              {customRoles.length === 0 ? (
+                <p style={{ color: '#888', fontSize: '12px', textAlign: 'center' }}>No custom roles yet</p>
+              ) : (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                  {customRoles.map(r => (
+                    <span key={r} style={{
+                      background: '#cc88ff30',
+                      border: '1px solid #cc88ff',
+                      padding: '2px 6px',
+                      borderRadius: '4px',
+                      fontSize: '12px',
+                      color: '#cc88ff',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '4px'
+                    }}>
+                      {r}
+                      <button 
+                        onClick={() => handleDeleteCustomRole(r)}
+                        style={{
+                          background: 'transparent',
+                          border: 'none',
+                          color: '#ff6666',
+                          cursor: 'pointer',
+                          padding: '0 2px',
+                          fontSize: '10px'
+                        }}
+                      >✕</button>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          
+          <select value={role} onChange={e => handleRoleChange(e.target.value)} style={inputStyle}>
+            {allRoles.map(r => (
+              <option key={r} value={r}>
+                {r === 'Other' ? '🌟 Other (Create New)' : r}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Custom Role Input */}
+        {showCustomInput && (
+          <div style={{
+            background: '#1a1a2e',
+            border: '1px solid #cc88ff',
+            borderRadius: '4px',
+            padding: '8px'
+          }}>
+            <label style={{ display: 'block', marginBottom: 4, color: '#cc88ff', fontSize: '14px' }}>
+              🌟 Create New Custom Role
+            </label>
+            <input 
+              type="text" 
+              value={customRole} 
+              onChange={e => setCustomRole(e.target.value)}
+              placeholder="e.g., Advocate, Revolutionary, Doctor..."
+              style={{ ...inputStyle, borderColor: '#cc88ff' }}
+              onKeyDown={e => { if (e.key === 'Enter') handleCreateCustomRole(); }}
+            />
+            <button 
+              onClick={handleCreateCustomRole}
+              disabled={!customRole.trim()}
+              style={{
+                marginTop: '6px',
+                padding: '4px 8px',
+                background: customRole.trim() ? '#cc88ff' : '#444',
+                color: customRole.trim() ? '#000' : '#888',
+                border: 'none',
+                cursor: customRole.trim() ? 'pointer' : 'not-allowed',
+                fontSize: '14px',
+                fontFamily: 'monospace',
+                borderRadius: '4px'
+              }}
+            >
+              + Add & Use This Role
+            </button>
+          </div>
+        )}
+
+        <div style={{ display: 'flex', gap: 8 }}>
           <div style={{ flex: 1 }}>
             <label style={{ display: 'block', marginBottom: 4, color: 'var(--pixel-text-dim)', fontSize: '16px' }}>Dept</label>
             <select value={dept} onChange={e => setDept(e.target.value)} style={inputStyle}>
-              {['Engineering', 'Design', 'Management', 'QA', 'Marketing', 'Sales', 'HR', 'Operations'].map(d => <option key={d} value={d}>{d}</option>)}
+              {['Engineering', 'Design', 'Management', 'QA', 'Marketing', 'Sales', 'HR', 'Operations', 'Legal', 'Finance'].map(d => <option key={d} value={d}>{d}</option>)}
             </select>
           </div>
-        </div>
-
-        <div style={{ display: 'flex', gap: 8 }}>
           <div style={{ flex: 1 }}>
             <label style={{ display: 'block', marginBottom: 4, color: 'var(--pixel-text-dim)', fontSize: '16px' }}>Location</label>
             <select value={country} onChange={e => setCountry(e.target.value)} style={inputStyle}>
               {COUNTRIES.map(c => <option key={c.name} value={c.name}>{c.flag} {c.name}</option>)}
             </select>
           </div>
-          <div style={{ width: 80 }}>
-            <label style={{ display: 'block', marginBottom: 4, color: 'var(--pixel-text-dim)', fontSize: '16px' }}>Curr</label>
-            <select value={currency} onChange={e => setCurrency(e.target.value)} style={inputStyle}>
-              {Object.keys(CURRENCY_SYMBOLS).map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
-          </div>
         </div>
 
-        <div>
-          <label style={{ display: 'block', marginBottom: 4, color: 'var(--pixel-text-dim)', fontSize: '16px' }}>Monthly Salary ({CURRENCY_SYMBOLS[currency] ?? currency})</label>
-          <div style={{ display: 'flex', alignItems: 'center', background: 'var(--pixel-bg)', border: '2px solid var(--pixel-border)' }}>
-            <span style={{ padding: '0 8px', color: '#aaccff', fontSize: '18px' }}>{CURRENCY_SYMBOLS[currency] ?? '$'}</span>
-            <input type="number" value={salaryStr} onChange={e => setSalaryStr(e.target.value)} style={{ ...inputStyle, border: 'none', flex: 1 }} onKeyDown={e => { if (e.key === 'Enter') handleHire(); if (e.key === 'Escape') onClose(); }} />
+        <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ flex: 1 }}>
+            <label style={{ display: 'block', marginBottom: 4, color: 'var(--pixel-text-dim)', fontSize: '16px' }}>Currency</label>
+            <select value={currency} onChange={e => setCurrency(e.target.value)} style={inputStyle}>
+              {Object.keys(CURRENCY_SYMBOLS).map(c => <option key={c} value={c}>{CURRENCY_SYMBOLS[c]} {c}</option>)}
+            </select>
+          </div>
+          <div style={{ flex: 2 }}>
+            <label style={{ display: 'block', marginBottom: 4, color: 'var(--pixel-text-dim)', fontSize: '16px' }}>Monthly Salary</label>
+            <div style={{ display: 'flex', alignItems: 'center', background: 'var(--pixel-bg)', border: '2px solid var(--pixel-border)' }}>
+              <span style={{ padding: '0 8px', color: '#aaccff', fontSize: '18px' }}>{CURRENCY_SYMBOLS[currency] ?? '$'}</span>
+              <input type="number" value={salaryStr} onChange={e => setSalaryStr(e.target.value)} style={{ ...inputStyle, border: 'none', flex: 1 }} onKeyDown={e => { if (e.key === 'Enter') handleHire(); if (e.key === 'Escape') onClose(); }} />
+            </div>
           </div>
         </div>
 
@@ -207,371 +390,85 @@ export function BottomToolbar({
   workspaceFolders,
   externalAssetDirectories,
   onHireAgent,
-  currentFloor = 0,
+  currentFloor,
   onFloorChange,
   onStatsClick,
   statsOpen,
 }: BottomToolbarProps) {
-  const [hovered, setHovered] = useState<string | null>(null);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [isFolderPickerOpen, setIsFolderPickerOpen] = useState(false);
-  const [isBypassMenuOpen, setIsBypassMenuOpen] = useState(false);
-  const [hoveredFolder, setHoveredFolder] = useState<number | null>(null);
-  const [hoveredBypass, setHoveredBypass] = useState<number | null>(null);
-  const [isHireOpen, setIsHireOpen] = useState(false);
-  const [isFloorOpen, setIsFloorOpen] = useState(false);
-  const folderPickerRef = useRef<HTMLDivElement>(null);
-  const pendingBypassRef = useRef(false);
+  const [showHire, setShowHire] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
 
-  // Close folder picker / bypass menu on outside click
-  useEffect(() => {
-    if (!isFolderPickerOpen && !isBypassMenuOpen) return;
-    const handleClick = (e: MouseEvent) => {
-      if (folderPickerRef.current && !folderPickerRef.current.contains(e.target as Node)) {
-        setIsFolderPickerOpen(false);
-        setIsBypassMenuOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [isFolderPickerOpen, isBypassMenuOpen]);
-
-  const hasMultipleFolders = workspaceFolders.length > 1;
-
-  const handleAgentClick = () => {
-    setIsBypassMenuOpen(false);
-    pendingBypassRef.current = false;
-    if (hasMultipleFolders) {
-      setIsFolderPickerOpen((v) => !v);
-    } else {
-      onOpenClaude();
+  const handleFloorChange = (delta: number) => {
+    if (onFloorChange && currentFloor !== undefined) {
+      const next = currentFloor + delta;
+      if (next >= 1 && next <= 4) onFloorChange(next);
     }
-  };
-
-  const handleAgentRightClick = (e: React.MouseEvent) => {
-    e.preventDefault();
-    setIsFolderPickerOpen(false);
-    setIsBypassMenuOpen((v) => !v);
-  };
-
-  const handleFolderSelect = (folder: WorkspaceFolder) => {
-    setIsFolderPickerOpen(false);
-    const bypassPermissions = pendingBypassRef.current;
-    pendingBypassRef.current = false;
-    vscode.postMessage({ type: 'openClaude', folderPath: folder.path, bypassPermissions });
-  };
-
-  const handleBypassSelect = (bypassPermissions: boolean) => {
-    setIsBypassMenuOpen(false);
-    if (hasMultipleFolders) {
-      pendingBypassRef.current = bypassPermissions;
-      setIsFolderPickerOpen(true);
-    } else {
-      vscode.postMessage({ type: 'openClaude', bypassPermissions });
-    }
-  };
-
-  const handleHire = (name: string, role: string, dept: string, salary: number, currency: string, country: string) => {
-    onHireAgent?.(name, role, dept, salary, currency, country);
-    setIsHireOpen(false);
   };
 
   return (
     <>
       <div style={panelStyle}>
-        <div ref={folderPickerRef} style={{ position: 'relative' }}>
-          <button
-            onClick={handleAgentClick}
-            onContextMenu={handleAgentRightClick}
-            onMouseEnter={() => setHovered('agent')}
-            onMouseLeave={() => setHovered(null)}
-            style={{
-              ...btnBase,
-              padding: '5px 12px',
-              background:
-                hovered === 'agent' || isFolderPickerOpen || isBypassMenuOpen
-                  ? 'var(--pixel-agent-hover-bg)'
-                  : 'var(--pixel-agent-bg)',
-              border: '2px solid var(--pixel-agent-border)',
-              color: 'var(--pixel-agent-text)',
-            }}
-          >
-            + Agent
-          </button>
-          {isBypassMenuOpen && (
-            <div
-              style={{
-                position: 'absolute',
-                bottom: '100%',
-                left: 0,
-                marginBottom: 4,
-                background: 'var(--pixel-bg)',
-                border: '2px solid var(--pixel-border)',
-                borderRadius: 0,
-                padding: 4,
-                boxShadow: 'var(--pixel-shadow)',
-                minWidth: 180,
-                zIndex: 'var(--pixel-controls-z)',
-              }}
-            >
-              <button
-                onClick={() => handleBypassSelect(false)}
-                onMouseEnter={() => setHoveredBypass(0)}
-                onMouseLeave={() => setHoveredBypass(null)}
-                style={{
-                  display: 'block',
-                  width: '100%',
-                  textAlign: 'left',
-                  padding: '6px 10px',
-                  fontSize: '24px',
-                  color: 'var(--pixel-text)',
-                  background: hoveredBypass === 0 ? 'rgba(255, 255, 255, 0.08)' : 'transparent',
-                  border: 'none',
-                  borderRadius: 0,
-                  cursor: 'pointer',
-                }}
-              >
-                Normal
-              </button>
-              <div style={{ height: 1, margin: '4px 0', background: 'var(--pixel-border)' }} />
-              <button
-                onClick={() => handleBypassSelect(true)}
-                onMouseEnter={() => setHoveredBypass(1)}
-                onMouseLeave={() => setHoveredBypass(null)}
-                style={{
-                  display: 'block',
-                  width: '100%',
-                  textAlign: 'left',
-                  padding: '6px 10px',
-                  fontSize: '24px',
-                  color: 'var(--pixel-warning-text)',
-                  background: hoveredBypass === 1 ? 'rgba(255, 255, 255, 0.08)' : 'transparent',
-                  border: 'none',
-                  borderRadius: 0,
-                  cursor: 'pointer',
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                <span style={{ fontSize: '16px' }}>⚡</span> Bypass Permissions
-              </button>
-            </div>
-          )}
-          {isFolderPickerOpen && (
-            <div
-              style={{
-                position: 'absolute',
-                bottom: '100%',
-                left: 0,
-                marginBottom: 4,
-                background: 'var(--pixel-bg)',
-                border: '2px solid var(--pixel-border)',
-                borderRadius: 0,
-                boxShadow: 'var(--pixel-shadow)',
-                minWidth: 160,
-                zIndex: 'var(--pixel-controls-z)',
-              }}
-            >
-              {workspaceFolders.map((folder, i) => (
-                <button
-                  key={folder.path}
-                  onClick={() => handleFolderSelect(folder)}
-                  onMouseEnter={() => setHoveredFolder(i)}
-                  onMouseLeave={() => setHoveredFolder(null)}
-                  style={{
-                    display: 'block',
-                    width: '100%',
-                    textAlign: 'left',
-                    padding: '6px 10px',
-                    fontSize: '22px',
-                    color: 'var(--pixel-text)',
-                    background: hoveredFolder === i ? 'var(--pixel-btn-hover-bg)' : 'transparent',
-                    border: 'none',
-                    borderRadius: 0,
-                    cursor: 'pointer',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {folder.name}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
+        <ToolBtn title="Hire Agent (H)" onClick={() => setShowHire(s => !s)} active={showHire}>
+          👤
+        </ToolBtn>
+        <ToolBtn title="Edit Mode (E)" onClick={onToggleEditMode} active={isEditMode}>
+          🖋️
+        </ToolBtn>
+        <ToolBtn title="Debug Mode (D)" onClick={onToggleDebugMode} active={isDebugMode}>
+          🐛
+        </ToolBtn>
+        <ToolBtn title="Stats Dashboard" onClick={onStatsClick} active={!!statsOpen}>
+          📊
+        </ToolBtn>
 
-        {/* HIRE AGENT button */}
-        <div style={{ position: 'relative' }}>
-          {isHireOpen && (
-            <HireDialog
-              onClose={() => setIsHireOpen(false)}
-              onHire={handleHire}
-            />
-          )}
-          <button
-            onClick={() => setIsHireOpen((v) => !v)}
-            onMouseEnter={() => setHovered('hire')}
-            onMouseLeave={() => setHovered(null)}
-            style={{
-              ...btnBase,
-              padding: '5px 12px',
-              background:
-                isHireOpen
-                  ? 'var(--pixel-active-bg)'
-                  : hovered === 'hire'
-                  ? 'var(--pixel-agent-hover-bg)'
-                  : 'var(--pixel-agent-bg)',
-              border: '2px solid var(--pixel-agent-border)',
-              color: 'var(--pixel-agent-text)',
-            }}
-            title="Hire a new agent with a role"
-          >
-            👤 Hire
-          </button>
-        </div>
+        <div style={{ width: '2px', height: '30px', background: 'var(--pixel-border)', margin: '0 4px' }} />
 
-        {/* STATS button */}
-        <button
-          onClick={onStatsClick}
-          onMouseEnter={() => setHovered('stats')}
-          onMouseLeave={() => setHovered(null)}
-          style={{
-            ...btnBase,
-            padding: '5px 12px',
-            background: statsOpen ? 'var(--pixel-active-bg)' : hovered === 'stats' ? 'var(--pixel-btn-hover-bg)' : btnBase.background,
-            color: statsOpen ? 'var(--pixel-agent-text)' : 'var(--pixel-text-dim)',
-            border: statsOpen ? '2px solid var(--pixel-agent-border)' : btnBase.border,
-          }}
-          title="View office stats"
-        >
-          📊 Stats
-        </button>
+        <ToolBtn title="Previous Floor (←)" onClick={() => handleFloorChange(-1)}>
+          ◀
+        </ToolBtn>
+        <span style={{ fontSize: '14px', color: 'var(--pixel-text)', fontFamily: 'monospace', padding: '0 6px', minWidth: '40px', textAlign: 'center' }}>
+          F{currentFloor}
+        </span>
+        <ToolBtn title="Next Floor (→)" onClick={() => handleFloorChange(+1)}>
+          ▶
+        </ToolBtn>
 
-        {/* FLOOR SELECTOR */}
-        <div style={{ position: 'relative' }}>
-          <button
-            onClick={() => setIsFloorOpen(v => !v)}
-            onMouseEnter={() => setHovered('floor')}
-            onMouseLeave={() => setHovered(null)}
-            style={{
-              ...btnBase,
-              padding: '5px 12px',
-              background: isFloorOpen || hovered === 'floor'
-                ? 'var(--pixel-btn-hover-bg)'
-                : btnBase.background,
-            }}
-            title="Switch floor"
-          >
-            {currentFloor === 0 ? '🏢 Ground' : `🏢 Floor ${currentFloor}`}
-          </button>
-          {isFloorOpen && (
-            <div style={{
-              position: 'absolute',
-              bottom: '100%',
-              left: 0,
-              marginBottom: 4,
-              background: 'var(--pixel-bg)',
-              border: '2px solid var(--pixel-border)',
-              borderRadius: 0,
-              boxShadow: 'var(--pixel-shadow)',
-              minWidth: 140,
-              zIndex: 'var(--pixel-controls-z)',
-            }}>
-              {[
-                { label: '🏢 Ground Floor', desc: 'Working Area + Lounge' },
-                { label: '🏢 Floor 1',      desc: 'Conference Room' },
-                { label: '🏢 Floor 2',      desc: 'Break Room' },
-                { label: '🏢 Floor 3',      desc: 'Double Working Area' },
-              ].map((f, i) => (
-                <button
-                  key={i}
-                  onClick={() => {
-                    onFloorChange?.(i);
-                    setIsFloorOpen(false);
-                  }}
-                  onMouseEnter={() => setHovered(`floor-${i}`)}
-                  onMouseLeave={() => setHovered(null)}
-                  style={{
-                    display: 'block',
-                    width: '100%',
-                    textAlign: 'left',
-                    padding: '7px 10px',
-                    fontSize: '21px',
-                    color: currentFloor === i ? 'var(--pixel-agent-text)' : 'var(--pixel-text)',
-                    background: currentFloor === i
-                      ? 'var(--pixel-active-bg)'
-                      : hovered === `floor-${i}` ? 'var(--pixel-btn-hover-bg)' : 'transparent',
-                    border: 'none',
-                    borderBottom: i < 2 ? '1px solid var(--pixel-border)' : 'none',
-                    borderRadius: 0,
-                    cursor: 'pointer',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  <div>{f.label}</div>
-                  <div style={{ fontSize: '16px', color: 'var(--pixel-text-dim)', marginTop: 2 }}>{f.desc}</div>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
+        <div style={{ width: '2px', height: '30px', background: 'var(--pixel-border)', margin: '0 4px' }} />
 
-        <button
-          onClick={() => window.open('./multi-floor.html', '_blank')}
-          onMouseEnter={() => setHovered('multifloor')}
-          onMouseLeave={() => setHovered(null)}
-          style={{
-            ...btnBase,
-            background: hovered === 'multifloor' ? 'var(--pixel-btn-hover-bg)' : btnBase.background,
-          }}
-          title="View all floors"
-        >
-          ⊞ All Floors
-        </button>
-
-        <button
-          onClick={onToggleEditMode}
-          onMouseEnter={() => setHovered('edit')}
-          onMouseLeave={() => setHovered(null)}
-          style={
-            isEditMode
-              ? { ...btnActive }
-              : {
-                  ...btnBase,
-                  background: hovered === 'edit' ? 'var(--pixel-btn-hover-bg)' : btnBase.background,
-                }
-          }
-          title="Edit office layout"
-        >
-          Layout
-        </button>
-        <div style={{ position: 'relative' }}>
-          <button
-            onClick={() => setIsSettingsOpen((v) => !v)}
-            onMouseEnter={() => setHovered('settings')}
-            onMouseLeave={() => setHovered(null)}
-            style={
-              isSettingsOpen
-                ? { ...btnActive }
-                : {
-                    ...btnBase,
-                    background:
-                      hovered === 'settings' ? 'var(--pixel-btn-hover-bg)' : btnBase.background,
-                  }
-            }
-            title="Settings"
-          >
-            Settings
-          </button>
-          <SettingsModal
-            isOpen={isSettingsOpen}
-            onClose={() => setIsSettingsOpen(false)}
-            isDebugMode={isDebugMode}
-            onToggleDebugMode={onToggleDebugMode}
-            alwaysShowOverlay={alwaysShowOverlay}
-            onToggleAlwaysShowOverlay={onToggleAlwaysShowOverlay}
-            externalAssetDirectories={externalAssetDirectories}
-          />
-        </div>
+        <ToolBtn title="Open Claude" onClick={onOpenClaude}>
+          🤖
+        </ToolBtn>
+        <ToolBtn title="Settings" onClick={() => setShowSettings(s => !s)} active={showSettings}>
+          ⚙️
+        </ToolBtn>
       </div>
+
+      {showHire && (
+        <HireDialog onClose={() => setShowHire(false)} onHire={onHireAgent ?? (() => {})} />
+      )}
+      {showSettings && (
+        <SettingsModal
+          workspaceFolders={workspaceFolders}
+          externalAssetDirectories={externalAssetDirectories}
+          alwaysShowOverlay={alwaysShowOverlay}
+          onToggleAlwaysShowOverlay={onToggleAlwaysShowOverlay}
+          onClose={() => setShowSettings(false)}
+        />
+      )}
     </>
+  );
+}
+
+function ToolBtn({ title, onClick, active, children }: { title: string; onClick: () => void; active?: boolean; children: React.ReactNode }) {
+  return (
+    <button
+      title={title}
+      onClick={onClick}
+      style={active ? btnActive : btnBase}
+      onMouseEnter={e => { if (!active) (e.currentTarget as HTMLButtonElement).style.background = 'var(--pixel-hover-bg)'; }}
+      onMouseLeave={e => { if (!active) (e.currentTarget as HTMLButtonElement).style.background = 'var(--pixel-btn-bg)'; }}
+    >
+      {children}
+    </button>
   );
 }

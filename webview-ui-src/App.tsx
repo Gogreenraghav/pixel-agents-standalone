@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { startWorkSimulation, getWorkState } from './work-simulation.js';
 
+import { fetchEmployees, hireEmployee as dbHireEmployee } from './pixel-office-integration.js';
 import { BottomToolbar } from './components/BottomToolbar.js';
 import { StatsDashboard, ROLE_SALARY } from './components/StatsDashboard.js';
 import { useOfficeEvents, EventBanner } from './components/OfficeEvents.js';
@@ -437,6 +439,47 @@ function App() {
   const hiredAgents = useHiredAgents();
   const [selectedHiredId, setSelectedHiredId] = useState<string | null>(null);
 
+  // ── Load Employees from Database on Init ─────────────────────────────────
+  useEffect(() => {
+    async function loadFromDB() {
+      try {
+        console.log('🔄 Loading employees from database...');
+        const dbEmployees = await fetchEmployees();
+        console.log('📊 Loaded from DB:', dbEmployees.length, 'employees');
+        
+        // Add each employee to the local store
+        for (const emp of dbEmployees) {
+          // Check if already exists
+          const exists = hiredAgentsStore.some(a => a.id === emp.id);
+          if (!exists) {
+            const numericId = Date.now() + Math.random();
+            // Dispatch to Pixel Agents engine
+            window.dispatchEvent(new MessageEvent('message', {
+              data: {
+                type: 'agentCreated',
+                id: numericId,
+                folderName: `${emp.name} (${emp.role})`,
+                palette: Math.floor(Math.random() * 6),
+                hueShift: Math.floor(Math.random() * 360),
+              }
+            }));
+            addHiredAgent({
+              ...emp,
+              pixelCharId: numericId,
+              tasksCompleted: 0,
+            });
+          }
+        }
+        console.log("✅ Employees loaded from database!");
+    // Start work simulation
+    startWorkSimulation();
+      } catch (err) {
+        console.error('❌ Failed to load from database:', err);
+      }
+    }
+    loadFromDB();
+  }, []);
+
   // ── Floor state ───────────────────────────────────────────────
   // URL param: ?floor=N loads that floor automatically
   const urlFloorParam = parseInt(new URLSearchParams(window.location.search).get('floor') ?? '0', 10);
@@ -527,7 +570,7 @@ function App() {
   }, [currentFloor, loadFloorFile]);
   const selectedHiredAgent = hiredAgents.find(a => a.id === selectedHiredId) ?? null;
 
-  const handleHireAgent = useCallback((name: string, role: string, dept: string, salary: number, currency: string, country: string) => {
+  const handleHireAgent = useCallback(async (name: string, role: string, dept: string, salary: number, currency: string, country: string) => {
     // Dispatch to Pixel Agents engine — use a numeric-friendly id
     const numericId = Date.now();
     const agentId = `hired_${numericId}`;
@@ -540,6 +583,7 @@ function App() {
         hueShift: Math.floor(Math.random() * 360),
       }
     }));
+    
     // Add to our list, recording the pixel char id
     addHiredAgent({
       id: agentId,
@@ -555,6 +599,14 @@ function App() {
       level: 1,
       tasksCompleted: 0,
     });
+    
+    // Save to DATABASE (API Integration)
+    try {
+      await dbHireEmployee(name, role, dept, salary, currency);
+      console.log('✅ Employee saved to database');
+    } catch (err) {
+      console.error('Failed to save to database:', err);
+    }
   }, []);
 
   const handleAgentStatusChange = useCallback((id: string, status: string, zone: string) => {
